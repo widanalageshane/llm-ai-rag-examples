@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, START, END
@@ -6,6 +8,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
+from langchain_core.output_parsers import StrOutputParser
 
 # ─── Fictionary Creature Catalog ─────────────────────────────────────────────
 
@@ -93,14 +96,24 @@ CREATURES = [
 ]
 
 
-# ─── ChromaDB vector store (in-memory, built at startup) ─────────────────────
+# ─── ChromaDB vector store (file-based, built once) ──────────────────────────
+
+CHROMA_DIR = "./chroma_db_demo6"
 
 embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
 
-vector_store = Chroma.from_texts(
-    texts=[json.dumps(c) for c in CREATURES],
-    embedding=embeddings,
-)
+if os.path.exists(CHROMA_DIR):
+    print("Loading existing vector store from disk...")
+    vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+else:
+    print("Building vector store and persisting to disk...")
+    vector_store = Chroma.from_texts(
+        texts=[json.dumps(c) for c in CREATURES],
+        embedding=embeddings,
+        persist_directory=CHROMA_DIR,
+    )
+    print("Vector store ready. Waiting for quota cooldown...")
+    time.sleep(5)  # The 'Magic Fix' for Free Tier 500 errors
 
 retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
@@ -117,17 +130,24 @@ class State(TypedDict):
 
 # ─── LLM ─────────────────────────────────────────────────────────────────────
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview")
 
+str_parser = StrOutputParser()
+rewrite_chain = llm | str_parser
+grade_chain = llm | str_parser
+generate_chain = llm | str_parser
 
 # ─── Nodes ────────────────────────────────────────────────────────────────────
 
 def retrieve(state: State) -> dict:
-    """Retrieve the most relevant creatures via ChromaDB similarity search."""
+    """Retrieve documents. Includes a sleep to prevent Free Tier 500 errors."""
+    print(f"--- RETRIEVING for: {state['query']} ---")
+    print(f"  [DEBUG] query type={type(state['query'])}, len={len(state['query'])}, repr={repr(state['query'])}")
+
+    # 15-second pause prevents the Embedding API from crashing on back-to-back calls
+    time.sleep(15)
+
     docs = retriever.invoke(state["query"])
-
-    #print([doc.page_content for doc in docs])  # debug print to see retrieved documents
-
     return {
         "context": [doc.page_content for doc in docs],
         "retry_count": state["retry_count"] + 1,
@@ -149,9 +169,12 @@ def rewrite_query(state: State) -> dict:
             content=f"Original query: {state['query']}"
         ),
     ]
-    response = llm.invoke(messages)
-    print(f"Rewritten query: {response.content.strip()}")
-    return {"query": response.content.strip()}
+    #response = llm.invoke(messages)
+    time.sleep(2) 
+    response = rewrite_chain.invoke(messages)
+
+    print(f"Rewritten query: {response}")
+    return {"query": str(response)}
 
 
 def generate(state: State) -> dict:
@@ -171,12 +194,20 @@ def generate(state: State) -> dict:
         )),
     ]
 
-    response = llm.invoke(messages)
-    return {"answer": response.content}
+    print("--- STARTING GENERATION ---")
+    time.sleep(2) 
+
+    #response = llm.invoke(messages)
+    response = generate_chain.invoke(messages)
+    print(f"Generated answer: {response}")
+    print(f"--- END OF GENERATION ---\n")
+    return {"answer": response}
 
 def grade_relevance(state: State) -> dict:
     """Ask Gemini whether the retrieved documents answer the query."""
     context_block = "\n\n".join(state["context"])
+
+    print("--- STARTING GRADING RELEVANCE ---")
 
     messages = [
         SystemMessage(content=(
@@ -190,8 +221,17 @@ def grade_relevance(state: State) -> dict:
         )),
     ]
 
-    response = llm.invoke(messages)
-    grade = response.content.strip().lower()
+    response = grade_chain.invoke(messages)
+   
+    # Strict cleaning to ensure the router works
+    grade = response.strip().lower()
+    if "irrelevant" in grade:
+        grade = "irrelevant"
+    elif "relevant" in grade:
+        grade = "relevant"
+    
+    print(f"Relevance grade: {grade}")
+    print(f"--- END OF GRADING ---\n")
     return {"grade": grade}
 
 
@@ -235,7 +275,8 @@ queries = [
     #"How does nuclear fusion work?",
     #"Which creature has the highest intelligence?"
     #"Is the Iron Basilisk dangerous to humans?"
-    "Are Mongrels dangerous to Saltmaws?"
+    #"Are Mongrels dangerous to Saltmaws?"
+    "Is there any creature which can turn opponent in liquid?"
 
 ]
 
