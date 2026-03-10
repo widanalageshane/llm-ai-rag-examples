@@ -1,5 +1,5 @@
 """
-Demo 7.1 – Resumable AI Procurement Agent (LangGraph Persistence + Interrupt)
+Demo 8 – Resumable AI Procurement Agent (LangGraph Persistence + Interrupt)
 
 Scenario: An AI agent handles purchase requests. When a purchase exceeds
 €10,000 it must pause for manager approval — which may come hours or days later.
