@@ -129,7 +129,11 @@ def print_results(label, results, show_distances=False):
 
 print("\n--- EXERCISE 1: Basic metadata filter ---")
 
-# Write your code here:
+vpn_docs = collection.get(
+    where={"category": "vpn"}
+)
+print_results("Exercise 1 - category == vpn", vpn_docs)
+
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +146,26 @@ print("\n--- EXERCISE 1: Basic metadata filter ---")
 
 print("\n--- EXERCISE 2: Combined metadata filters ---")
 
-# Write your code here:
+high_2025_verified = collection.get(
+    where={
+        "$and": [
+            {"priority": "high"},
+            {"year": 2025},
+            {"verified": True},
+        ]
+    }
+)
+print_results("Exercise 2A - high AND 2025 AND verified", high_2025_verified)
+
+software_or_printing = collection.get(
+    where={
+        "$or": [
+            {"category": "software"},
+            {"category": "printing"},
+        ]
+    }
+)
+print_results("Exercise 2B - software OR printing", software_or_printing)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +179,23 @@ print("\n--- EXERCISE 2: Combined metadata filters ---")
 
 print("\n--- EXERCISE 3: Full text search ---")
 
-# Write your code here:
+contains_student = collection.get(
+    where_document={"$contains": "student"}
+)
+print_results('Exercise 3A - contains "student"', contains_student)
+
+contains_student_not_password = collection.get(
+    where_document={
+        "$and": [
+            {"$contains": "student"},
+            {"$not_contains": "password"},
+        ]
+    }
+)
+print_results('Exercise 3B - contains "student" but not "password"', contains_student_not_password)
+
+excluded_count = len(contains_student["ids"]) - len(contains_student_not_password["ids"])
+print(f"\nExcluded count: {excluded_count}")
 
 
 # ---------------------------------------------------------------------------
@@ -171,4 +210,19 @@ print("\n--- EXERCISE 3: Full text search ---")
 
 print("\n--- EXERCISE 4: Semantic query + metadata filter + text filter ---")
 
-# Write your code here:
+filtered_print_query = collection.query(
+    query_texts=["how do I print documents on campus"],
+    n_results=5,
+    where={"category": "printing"},
+    where_document={"$contains": "page"},
+    include=["documents", "metadatas", "distances"],
+)
+print_results("Exercise 4 - filtered semantic query", filtered_print_query, show_distances=True)
+
+unfiltered_print_query = collection.query(
+    query_texts=["how do I print documents on campus"],
+    n_results=5,
+    where_document={"$contains": "page"},
+    include=["documents", "metadatas", "distances"],
+)
+print_results("Exercise 4 - no category filter", unfiltered_print_query, show_distances=True)
