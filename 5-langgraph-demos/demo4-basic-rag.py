@@ -4,7 +4,6 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
 # ─── Fictionary Creature Catalog ─────────────────────────────────────────────
@@ -107,15 +106,43 @@ retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
 # ─── State ────────────────────────────────────────────────────────────────────
 
-class State(TypedDict):
-    query: str           # user question
-    context: list[str]   # retrieved creature entries
-    answer: str          # final LLM response
+class State(TypedDict, total=False):
+    query: str            # user question
+    context: list[str]    # retrieved creature entries
+    answer: str           # final LLM response
+    sources: list[str]    # creature names parsed from retrieved docs
+    retry_count: int      # incremented in retrieve()
 
 
-# ─── LLM ─────────────────────────────────────────────────────────────────────
+# ─── LLM ──────────────────────────────────────────────────────────────────────
 
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite")
+
+
+# ─── Helper function for Part 3c ──────────────────────────────────────────────
+
+def is_relevant(query: str, documents: list[str]) -> bool:
+    """
+    Simple heuristic relevance check.
+    Returns True if at least one meaningful query word appears
+    in the combined retrieved documents.
+    """
+    stop_words = {
+        "what", "which", "who", "where", "when", "why", "how",
+        "is", "are", "the", "a", "an", "of", "in", "on", "to",
+        "me", "about", "tell", "and", "or", "with"
+    }
+
+    query_words = {
+        word.strip("?,.!:;\"'()").lower()
+        for word in query.split()
+        if word.strip("?,.!:;\"'()").lower() not in stop_words
+    }
+
+    combined_docs = " ".join(documents).lower()
+
+    match_count = sum(1 for word in query_words if word in combined_docs)
+    return match_count >= 1
 
 
 # ─── Nodes ────────────────────────────────────────────────────────────────────
@@ -124,45 +151,90 @@ def retrieve(state: State) -> dict:
     """Retrieve the most relevant creatures via ChromaDB similarity search."""
     docs = retriever.invoke(state["query"])
 
-    #print([doc.page_content for doc in docs])  # debug print to see retrieved documents
+    # Debug print to inspect raw retrieved documents
+    print("\n[DEBUG] Retrieved documents:")
+    for i, doc in enumerate(docs, start=1):
+        print(f"{i}. {doc.page_content}")
 
-    return {"context": [doc.page_content for doc in docs]}
+    context = [doc.page_content for doc in docs]
+
+    sources = []
+    for doc in docs:
+        try:
+            parsed = json.loads(doc.page_content)
+            sources.append(parsed.get("name", "Unknown"))
+        except json.JSONDecodeError:
+            sources.append("Unknown")
+
+    current_retry_count = state.get("retry_count", 0) + 1
+
+    return {
+        "context": context,
+        "sources": sources,
+        "retry_count": current_retry_count,
+    }
 
 
 def generate(state: State) -> dict:
     """Generate an answer grounded in the retrieved creature entries."""
     context_block = "\n\n---\n\n".join(state["context"])
-    
 
     messages = [
-        SystemMessage(content=(
-            "You are a knowledgeable guide to a world of fictionary creatures. "
-            "Answer the user's question using only the provided creature catalog entries. "
-            "Be concise and informative."
-        )),
-        HumanMessage(content=(
-            f"Createure catalog entries:\n\n{context_block}\n\n"
-            f"Question: {state['query']}"
-        )),
+        SystemMessage(
+            content=(
+                "You are a knowledgeable guide to a world of fictionary creatures. "
+                "Answer the user's question using only the provided creature catalog entries. "
+                "Be concise and informative."
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"Creature catalog entries:\n\n{context_block}\n\n"
+                f"Question: {state['query']}"
+            )
+        ),
     ]
 
     response = llm.invoke(messages)
     return {"answer": response.content}
 
 
+def format_answer(state: State) -> dict:
+    """
+    Rewrite the answer as a numbered bullet list using simple Python
+    string manipulation only. No LLM call here.
+    """
+    raw_answer = state["answer"].strip()
+
+    # Split by lines, remove empty lines
+    lines = [line.strip(" -•\t") for line in raw_answer.splitlines() if line.strip()]
+
+    # If the model returned one paragraph, split by sentences
+    if len(lines) <= 1:
+        sentences = [s.strip() for s in raw_answer.replace("\n", " ").split(".") if s.strip()]
+        lines = sentences
+
+    formatted_lines = [f"{i}. {line}" for i, line in enumerate(lines, start=1)]
+    formatted_answer = "\n".join(formatted_lines)
+
+    return {"answer": formatted_answer}
+
+
 # ─── Graph ────────────────────────────────────────────────────────────────────
 #
-#   START → retrieve → generate → END
+#   START → retrieve → generate → format_answer → END
 #
 
 builder = StateGraph(State)
 
 builder.add_node("retrieve", retrieve)
 builder.add_node("generate", generate)
+builder.add_node("format_answer", format_answer)
 
 builder.add_edge(START, "retrieve")
 builder.add_edge("retrieve", "generate")
-builder.add_edge("generate", END)
+builder.add_edge("generate", "format_answer")
+builder.add_edge("format_answer", END)
 
 graph = builder.compile()
 
@@ -183,3 +255,6 @@ for query in queries:
     result = graph.invoke({"query": query})
 
     print(f"Answer:\n{result['answer']}")
+    print(f"\nSources: {result['sources']}")
+    print(f"Retry count: {result['retry_count']}")
+    print(f"Relevant? {is_relevant(query, result['context'])}")
